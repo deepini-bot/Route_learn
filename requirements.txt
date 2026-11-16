@@ -1,0 +1,5 @@
+numpy>=1.24
+matplotlib>=3.7        # experiments only
+fastapi>=0.110         # server only
+uvicorn>=0.27          # server only
+anthropic>=0.40        # real model calls only
