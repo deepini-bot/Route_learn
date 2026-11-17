@@ -26,7 +26,12 @@ def _count(low: str, kws) -> int:
     return sum(bool(re.search(r"\b" + re.escape(k), low)) for k in kws)
 
 
-def extract(prompt: str) -> np.ndarray:
+def extract(prompt: str, history: list[dict[str, str]] | None = None) -> np.ndarray:
+    prior_user_turns = [
+        message["content"] for message in (history or [])
+        if message.get("role") == "user"
+    ][-4:]
+    prompt = "\n".join(prior_user_turns + [prompt])
     p = prompt.strip()
     low = p.lower()
     words = p.split()

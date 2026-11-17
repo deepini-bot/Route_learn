@@ -1,6 +1,7 @@
 """Model tiers ("arms") and cost model.
 
-Prices are $/1M tokens and are PLACEHOLDERS: update them from the provider's pricing page.
+Prices are first-party Anthropic base prices in $/1M tokens; verify before deployment
+because provider pricing changes. The model IDs are pinned to the current lineup.
 `capability` is used ONLY by the simulator (it never influences real routing).
 """
 from dataclasses import dataclass
@@ -16,9 +17,9 @@ class Arm:
 
 
 ARMS = [
-    Arm("small", "claude-haiku-5-5", 1.0, 5.0, 0.38),
-    Arm("medium", "claude-sonnet-5-5", 3.0, 15.0, 0.64),
-    Arm("large", "claude-opus-5-5", 5.0, 25.0, 0.92),
+    Arm("small", "claude-haiku-5-5", 0.10, 0.50, 0.38),
+    Arm("medium", "claude-sonnet-5-5", 2.00, 10.00, 0.64),
+    Arm("large", "claude-opus-5-5", 4.00, 20.00, 0.92),
 ]
 N_ARMS = len(ARMS)
 
