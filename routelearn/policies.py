@@ -1,4 +1,6 @@
 """Routing policies. All share one interface so they can be benchmarked head-to-head."""
+import threading
+
 import numpy as np
 
 from .bandit import LinUCB
@@ -45,19 +47,46 @@ class StaticHeuristic(Policy):
 
 
 class BanditPolicy(Policy):
-    def __init__(self, lam: float = 0.4, alpha: float = 0.5, gamma: float = 1.0, label: str = "bandit"):
+    def __init__(self, lam: float = 0.4, alpha: float = 0.5, gamma: float = 1.0,
+                 label: str = "bandit", store=None):
         self.lam, self.name = lam, label
         self.model = LinUCB(N_ARMS, DIM, alpha=alpha, gamma=gamma)
         self.cost = np.array(COST_NORM)
+        self.store = store
+        self._lock = threading.RLock()
 
     def choose(self, x, meta=None):
-        mu, sigma = self.model.predict(x)
-        scores = mu + self.model.alpha * sigma - self.lam * self.cost
-        return int(np.argmax(scores)), {"quality_est": mu.tolist(), "uncertainty": sigma.tolist(),
-                                        "scores": scores.tolist()}
+        with self._lock:
+            if self.store is not None:
+                self.store.refresh_policy(self)
+            mu, sigma = self.model.predict(x)
+            scores = mu + self.model.alpha * sigma - self.lam * self.cost
+            return int(np.argmax(scores)), {"quality_est": mu.tolist(), "uncertainty": sigma.tolist(),
+                                            "scores": scores.tolist()}
 
     def update(self, arm, x, quality):
-        self.model.update(arm, x, quality)
+        with self._lock:
+            if self.store is not None:
+                self.store.update_policy(self, arm, x, quality)
+            else:
+                self.model.update(arm, x, quality)
+
+    def persist(self) -> None:
+        with self._lock:
+            if self.store is not None:
+                self.store.save_policy(self)
+
+    def set_lam(self, lam: float) -> None:
+        with self._lock:
+            if self.store is not None:
+                self.store.set_lambda(self, lam)
+            else:
+                self.lam = lam
+
+    def refresh(self) -> None:
+        with self._lock:
+            if self.store is not None:
+                self.store.refresh_policy(self)
 
     # persistence -------------------------------------------------------
     def save(self, path: str) -> None:

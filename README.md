@@ -33,27 +33,31 @@ against an oracle that knows every tier's true quality.
 
 | policy | quality | cost | cum. regret | post-degradation quality | post-degradation regret |
 |---|---|---|---|---|---|
-| always_large | 0.898 | 1.02x | 450 | 0.897 | 192 |
-| always_medium | 0.703 | 0.62x | 299 | 0.701 | 118 |
-| static heuristic | 0.685 | 0.63x | 383 | 0.630 | 272 |
-| **bandit (cold, γ=0.995)** | 0.707 | 0.61x | **260** | **0.740** | **132** |
-| **bandit (warm-start, γ=0.995)** | 0.734 | 0.69x | **214** | **0.746** | **113** |
-| oracle | 0.834 | 0.71x | 0 | 0.855 | 0 |
+| always_small | 0.326 | 0.03x | 647 | 0.206 | 518 |
+| always_medium | 0.703 | 0.50x | 250 | 0.701 | 77 |
+| always_large | 0.898 | 1.00x | 641 | 0.897 | 271 |
+| static heuristic | 0.685 | 0.52x | 356 | 0.630 | 244 |
+| bandit (cold, γ=1) | 0.629 | 0.40x | 308 | 0.626 | 199 |
+| **bandit (cold, γ=0.995)** | 0.619 | 0.38x | **289** | 0.627 | 181 |
+| **bandit (warm-start, γ=0.995)** | 0.643 | 0.43x | **237** | **0.667** | **139** |
+| oracle | 0.794 | 0.55x | 0 | 0.822 | 0 |
 
 ![regret](results/regret.png)
 
 **What the numbers say, including the unflattering parts**
 - After the regression, the static heuristic keeps sending easy prompts to the broken tier. Its
-  post-degradation regret is **272 vs 113–132** for the learners (roughly **half**), and quality is about 0.11 higher.
-- Forgetting matters: with `gamma=1` the learner recovers more slowly (cum. regret 313 vs 260).
-- **In a stationary setting the learner does *not* beat a well-tuned static heuristic**: see the
-  frontier below, where the static curve sits slightly above. The learner pays ~0.09x of
-  always-large for judging and warm-start (≈0.07x + ≈0.02x). What you buy with that is
-  robustness to change and no hand-tuning, not free savings.
-- `always_medium` is a strong baseline in this simulator (reward 0.328 vs 0.340 for the cold bandit).
-- The cascade (escalate when the judge scores low) raises quality 0.74→0.81 at 0.70x→0.88x cost, which is
-  about the same trade as lowering `lambda`. It is a safety net, not a free lunch.
-- A 10% judge rate performs nearly as well as 30% at lower cost; 3% starts to hurt adaptation.
+  post-degradation regret is **244 vs 139** for the warm-started bandit (43% lower); quality is
+  0.667 vs 0.630.
+- Forgetting helps in this run: `gamma=0.995` has lower cumulative regret than `gamma=1`
+  (289 vs 308), though the cold band's average quality is slightly lower (0.619 vs 0.629).
+- **In a stationary setting the learner does *not* beat a well-tuned static heuristic**: the
+  static frontier reaches higher quality at comparable costs. This supports treating online learning
+  as a drift-adaptation feature, not a guaranteed savings claim.
+- `always_medium` is a strong baseline in this simulator (reward 0.401 vs 0.394 for the cold bandit).
+- The cascade raises quality from 0.643 to 0.791 at 0.43x to 0.69x cost (`tau=0.5`), and to 0.846
+  at 0.84x cost (`tau=0.7`). It is a safety net, not a free lunch.
+- A 10% judge rate performs about as well as 30% in this run (quality 0.650 vs 0.643); 3% reduces
+  adaptation quality to 0.618.
 
 ![frontier](results/pareto.png)
 
@@ -81,6 +85,51 @@ curl -X POST localhost:8000/explain  -H 'content-type: application/json' -d '{"p
 curl localhost:8000/stats
 ```
 
+## Runtime API, state, and limits
+
+`POST /chat` accepts optional conversation history, using `user` and `assistant` roles:
+
+```json
+{
+  "prompt": "ok, do it",
+  "history": [
+    {"role": "user", "content": "Analyze the architecture and compare the trade-offs."},
+    {"role": "assistant", "content": "Here is the comparison..."}
+  ]
+}
+```
+
+Only the latest four user turns are included in routing features; the provider receives the supplied
+history (up to 20 messages and 20,000 total characters). `POST /chat/stream` returns server-sent
+events (`data: {"type":"delta","text":"..."}` followed by a `type: done` event with request metadata).
+When cascading is enabled, candidate text is buffered until the judge accepts an answer so rejected
+attempts are not sent as user-visible output.
+
+For deterministic tier testing, set `ROUTELEARN_ALLOW_TIER_OVERRIDE=true` before starting the
+server. Then `/chat`, `/chat/stream`, and `/explain` accept `"force_tier": "medium"` or
+`"force_tier": "large"` (`large` is the high tier). The override is disabled by default and returns
+HTTP 403 if requested while disabled. Forced calls still use the configured provider and count
+toward its usage, so use mock mode unless you intend to make billable Anthropic requests.
+
+The server stores bandit updates, feedback references, and quota usage in SQLite
+(`ROUTELEARN_DATABASE`, default `routelearn.sqlite3`), shared by workers on the same host. An
+existing `state.npz` initializes the database only when it has no saved bandit state. Use a networked
+database/service for workers on different hosts; SQLite is not a distributed database.
+
+Default guardrails are **60 requests/minute and $10/day per identity**. Set
+`ROUTELEARN_RATE_LIMIT_PER_MINUTE=0` or `ROUTELEARN_DAILY_SPEND_LIMIT=0` to disable the respective
+limit. With no `ROUTELEARN_API_KEYS`, all requests share one quota bucket. Set a comma-separated
+`ROUTELEARN_API_KEYS` list and send the matching `X-API-Key` header to enable separate per-key
+buckets and require keys on the API endpoints. API keys are compared as secrets and stored only as
+SHA-256 identities. The spend guard reserves a conservative token-cost estimate before calling a
+provider and settles against reported token usage afterward; provider-side discounts, cache rates,
+or billing adjustments are not reflected.
+
+Model IDs and base prices in `config.py` are from Anthropic's [model overview](https://platform.claude.com/docs/en/models/overview)
+and [API pricing](https://platform.claude.com/docs/en/about-claude/pricing), checked November 17,
+2026: Haiku 5.5 ($0.10/$0.50), Sonnet 5.5 ($2/$10), and Opus 5.5 ($4/$20) per million input/output
+tokens. Prices can change, so verify them before deployment.
+
 ## Project layout
 ```
 routelearn/  config.py (tiers, cost)  features.py  bandit.py (discounted LinUCB)  policies.py
@@ -96,8 +145,14 @@ experiments/ run_experiments.py   examples/ demo.py   tests/   results/   docs/D
 4. Compare to the simulator's conclusions and report where they differ.
 
 ## Known limitations
-- Simulator results only; real-world gains unmeasured.
-- `server.py` and the Anthropic provider/judge are written but were **not executed** in my environment
-  (no network, no FastAPI/anthropic installed). Everything else is covered by tests and experiments.
-- Prices in `config.py` are placeholders. Model names should be checked against the provider's current list.
-- Linear model on hand-built features; no embeddings. Judge bias/noise is simulated, not measured.
+- The experiment results remain simulator-only; the real-data replay harness has not been run on a
+  real dataset, so real-world routing gains are unmeasured.
+- HTTP routes, Anthropic request construction, judge parsing, and streaming are covered by tests using
+  mocked SDK responses. No live provider request is made by the test suite; configure an API key and
+  run a controlled smoke test before production.
+- Anthropic is the only implemented provider. OpenAI, Gemini, and local providers, semantic
+  embeddings, human-label judge calibration, real-latency penalties, drift alert delivery, and
+  real-data replay remain future work.
+- SQLite shares bandit learning state across workers on one host. Multi-host shared state needs an
+  external database/service.
+- The judge is not calibrated against human labels; monitor judge bias and quality with human audits.

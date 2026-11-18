@@ -3,6 +3,7 @@ import math
 import re
 import time
 from dataclasses import dataclass
+from typing import Generator
 
 import numpy as np
 
@@ -40,10 +41,17 @@ class SimProvider:
             cap += degrade[2]
         return 1.0 / (1.0 + math.exp(-cls.K * (cap - difficulty)))
 
-    def complete(self, arm_idx: int, prompt: str, meta: dict | None = None) -> Completion:
+    def complete(self, arm_idx: int, prompt: str, meta: dict | None = None,
+                 history: list[dict[str, str]] | None = None) -> Completion:
         q = self.expected_quality(arm_idx, meta["difficulty"], meta.get("t", 0), self.degrade)
         q = float(np.clip(q + self.rng.normal(0, self.noise), 0, 1))
         return Completion(f"[sim:{ARMS[arm_idx].name}]", 200, 400, est_cost(ARMS[arm_idx]), 0.0, q)
+
+    def stream(self, arm_idx: int, prompt: str, meta: dict | None = None,
+               history: list[dict[str, str]] | None = None) -> Generator[str, None, Completion]:
+        comp = self.complete(arm_idx, prompt, meta)
+        yield comp.text
+        return comp
 
 
 class SimJudge:
@@ -54,7 +62,8 @@ class SimJudge:
         self.rng = np.random.default_rng(seed)
         self.noise = noise
 
-    def score(self, prompt: str, comp: Completion) -> float:
+    def score(self, prompt: str, comp: Completion,
+              history: list[dict[str, str]] | None = None) -> float:
         return float(np.clip(comp.hidden_quality + self.rng.normal(0, self.noise), 0, 1))
 
 
@@ -62,10 +71,18 @@ class SimJudge:
 class MockProvider:
     """Canned answers so the API server runs without any key."""
 
-    def complete(self, arm_idx: int, prompt: str, meta=None) -> Completion:
+    def complete(self, arm_idx: int, prompt: str, meta=None,
+                 history: list[dict[str, str]] | None = None) -> Completion:
         arm = ARMS[arm_idx]
         return Completion(f"[mock answer from {arm.model}]", max(1, len(prompt) // 4), 50,
                           est_cost(arm), 0.0)
+
+    def stream(self, arm_idx: int, prompt: str, meta=None,
+               history: list[dict[str, str]] | None = None) -> Generator[str, None, Completion]:
+        comp = self.complete(arm_idx, prompt, meta, history)
+        for start in range(0, len(comp.text), 12):
+            yield comp.text[start:start + 12]
+        return comp
 
 
 class AnthropicProvider:
@@ -73,29 +90,67 @@ class AnthropicProvider:
         import anthropic  # lazy import: only needed for real calls
         self.client, self.max_tokens = anthropic.Anthropic(), max_tokens
 
-    def complete(self, arm_idx: int, prompt: str, meta=None) -> Completion:
+    @staticmethod
+    def _messages(prompt: str, history: list[dict[str, str]] | None) -> list[dict[str, str]]:
+        return [*(history or []), {"role": "user", "content": prompt}]
+
+    def complete(self, arm_idx: int, prompt: str, meta=None,
+                 history: list[dict[str, str]] | None = None) -> Completion:
         arm: Arm = ARMS[arm_idx]
-        t0 = time.time()
+        t0 = time.perf_counter()
         r = self.client.messages.create(model=arm.model, max_tokens=self.max_tokens,
-                                        messages=[{"role": "user", "content": prompt}])
+                                        messages=self._messages(prompt, history))
         tin, tout = r.usage.input_tokens, r.usage.output_tokens
-        return Completion(r.content[0].text, tin, tout,
-                          est_cost(arm, tin, tout), time.time() - t0)
+        return Completion("".join(block.text for block in r.content if hasattr(block, "text")), tin, tout,
+                          est_cost(arm, tin, tout), time.perf_counter() - t0)
+
+    def stream(self, arm_idx: int, prompt: str, meta=None,
+               history: list[dict[str, str]] | None = None) -> Generator[str, None, Completion]:
+        arm: Arm = ARMS[arm_idx]
+        t0 = time.perf_counter()
+        with self.client.messages.stream(
+            model=arm.model,
+            max_tokens=self.max_tokens,
+            messages=self._messages(prompt, history),
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
+            response = stream.get_final_message()
+        tin, tout = response.usage.input_tokens, response.usage.output_tokens
+        return Completion("".join(block.text for block in response.content
+                                  if hasattr(block, "text")), tin, tout,
+                          est_cost(arm, tin, tout), time.perf_counter() - t0)
 
 
 class LLMJudge:
     """Cheap LLM-as-judge: rates an answer 0-10; returned as 0-1."""
-    cost = JUDGE_COST
 
     def __init__(self):
         import anthropic
         self.client = anthropic.Anthropic()
+        self._last_cost = JUDGE_COST
 
-    def score(self, prompt: str, comp: Completion) -> float:
+    @property
+    def cost(self) -> float:
+        return self._last_cost
+
+    def score(self, prompt: str, comp: Completion,
+              history: list[dict[str, str]] | None = None) -> float:
         msg = ("Rate how well the ANSWER addresses the REQUEST on a 0-10 scale "
                "(10 = correct, complete, well-reasoned). Reply with the number only.\n\n"
+               f"CONVERSATION:\n{_format_history(history)}\n\n"
                f"REQUEST:\n{prompt[:3000]}\n\nANSWER:\n{comp.text[:4000]}")
         r = self.client.messages.create(model=JUDGE_ARM.model, max_tokens=5,
                                         messages=[{"role": "user", "content": msg}])
-        m = re.search(r"\d+(\.\d+)?", r.content[0].text)
-        return min(float(m.group()) / 10, 1.0) if m else 0.5
+        text = r.content[0].text
+        m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*", text)
+        if not m or not 0 <= float(m.group(1)) <= 10:
+            raise ValueError(f"Judge returned an invalid score: {r.content[0].text!r}")
+        self._last_cost = est_cost(
+            JUDGE_ARM, r.usage.input_tokens, r.usage.output_tokens
+        )
+        return float(m.group(1)) / 10
+
+
+def _format_history(history: list[dict[str, str]] | None) -> str:
+    return "\n".join(f"{message['role']}: {message['content']}" for message in history or [])

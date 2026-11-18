@@ -34,4 +34,6 @@ quality (judge/user) with cost handled separately. You only observe the quality 
 - *What breaks it?* A biased/noisy judge (it optimises what the judge likes); feature blind spots;
   non-stationary judge. Mitigate with periodic human-labelled audits and the `/feedback` channel.
 - *Why not always use the cheap model and cascade?* Cascade pays for the failed attempt plus the judge; see ablation.
-- *How would you scale it?* Stateless gateway + shared bandit state (Redis); batch the updates.
+- *How would you scale it?* SQLite shares bandit updates across worker processes on one host. For
+  multi-host deployments, move the state and quota transactions to a shared database/service (for
+  example Redis with transactional updates); the current implementation does not provide that backend.
