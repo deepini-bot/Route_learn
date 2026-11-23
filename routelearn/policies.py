@@ -7,6 +7,8 @@ from .bandit import LinUCB
 from .config import COST_NORM, N_ARMS
 from .features import DIM, IDX
 
+COMPLEXITY_PRIOR_BONUS = 0.6
+
 
 class Policy:
     name = "base"
@@ -52,6 +54,7 @@ class BanditPolicy(Policy):
         self.lam, self.name = lam, label
         self.model = LinUCB(N_ARMS, DIM, alpha=alpha, gamma=gamma)
         self.cost = np.array(COST_NORM)
+        self.complexity_policy = StaticHeuristic(t_medium=3.0)
         self.store = store
         self._lock = threading.RLock()
 
@@ -61,8 +64,17 @@ class BanditPolicy(Policy):
                 self.store.refresh_policy(self)
             mu, sigma = self.model.predict(x)
             scores = mu + self.model.alpha * sigma - self.lam * self.cost
-            return int(np.argmax(scores)), {"quality_est": mu.tolist(), "uncertainty": sigma.tolist(),
-                                            "scores": scores.tolist()}
+            prior_arm, prior = self.complexity_policy.choose(x, meta)
+            cold_start = not np.any(self.model.counts)
+            scores[prior_arm] += COMPLEXITY_PRIOR_BONUS
+            return int(np.argmax(scores)), {
+                "quality_est": mu.tolist(),
+                "uncertainty": sigma.tolist(),
+                "scores": scores.tolist(),
+                "cold_start": bool(cold_start),
+                "complexity_prior_tier": ("small", "medium", "large")[prior_arm],
+                "complexity_prior_score": prior["score"],
+            }
 
     def update(self, arm, x, quality):
         with self._lock:

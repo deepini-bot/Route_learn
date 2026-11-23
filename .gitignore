@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+state.npz
+.env
+routelearn.sqlite3
+routelearn.sqlite3-shm
+routelearn.sqlite3-wal

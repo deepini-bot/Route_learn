@@ -33,8 +33,59 @@ class TestFeatures(unittest.TestCase):
         # "capital" contains "api" as a substring; it must NOT count as code
         self.assertEqual(extract("What is the capital of France?")[IDX["n_code"]], 0.0)
 
+    def test_only_short_follow_ups_inherit_prompt_complexity(self):
+        history = [{
+            "role": "user",
+            "content": (
+                "Design a multi-tenant data migration platform with parallel processing, "
+                "checkpointing, retries, Kafka, rollback, and failure recovery."
+            ),
+        }]
+        standalone = "Explain the command in 4 to 5 sentences streamlit run app.py"
+
+        self.assertTrue(np.array_equal(extract(standalone), extract(standalone, history)))
+        self.assertGreater(
+            extract("ok, do it", history)[IDX["n_reason"]],
+            extract("ok, do it")[IDX["n_reason"]],
+        )
+
 
 class TestBandit(unittest.TestCase):
+    def test_cold_start_uses_prompt_complexity(self):
+        policy = BanditPolicy(lam=0.6, alpha=0.5, gamma=0.995)
+        architecture_prompt = (
+            "Design a multi-tenant data migration platform capable of migrating 100 million "
+            "records between customer environments. It should support incremental migrations, "
+            "parallel processing, checkpointing, retries, data validation, and rollback. "
+            "Explain the architecture, database schema, API design, Kafka integration, scaling "
+            "strategy, and failure recovery mechanisms"
+        )
+        easy_prompt = "What is TCP?"
+
+        selected, diagnostics = policy.choose(extract(architecture_prompt))
+        self.assertEqual(selected, 1)
+        self.assertTrue(diagnostics["cold_start"])
+        self.assertEqual(diagnostics["complexity_prior_tier"], "medium")
+        self.assertEqual(policy.choose(extract(easy_prompt))[0], 0)
+
+    def test_medium_complexity_prior_survives_sparse_feedback(self):
+        policy = BanditPolicy(lam=0.6, alpha=0.5, gamma=0.995)
+        prompt = (
+            "Design a multi-tenant data migration platform capable of migrating 100 million "
+            "records between customer environments. It should support incremental migrations, "
+            "parallel processing, checkpointing, retries, data validation, and rollback. "
+            "Explain the architecture, database schema, API design, Kafka integration, scaling "
+            "strategy, and failure recovery mechanisms"
+        )
+        features = extract(prompt)
+        for _ in range(4):
+            policy.update(0, features, 0.2)
+        policy.update(1, features, 0.0)
+
+        selected, diagnostics = policy.choose(features)
+        self.assertEqual(diagnostics["complexity_prior_tier"], "medium")
+        self.assertEqual(selected, 1)
+
     def test_learns_arm_quality(self):
         m, rng = LinUCB(2, 3), np.random.default_rng(0)
         for _ in range(300):

@@ -75,8 +75,14 @@ python examples/demo.py
 
 python experiments/run_experiments.py  # regenerates results/ (about 1 minute)
 python -m uvicorn routelearn.server:app --reload
+streamlit run app.py  # web chat UI (start the API in another terminal)
 make serve         # API (mock models unless ANTHROPIC_API_KEY is set)
 ```
+
+The Streamlit interface connects to the API at `http://localhost:8000` by default. Configure a
+different URL with `ROUTELEARN_API_URL`; if API keys are enabled, enter a valid key in the sidebar
+or set `ROUTELEARN_API_KEY`. The UI supports chat history, optional routing explanations, answer
+feedback, live router settings, and API status.
 ```bash
 curl -X POST localhost:8000/chat     -H 'content-type: application/json' -d '{"prompt":"What is TCP?"}'
 curl -X POST localhost:8000/feedback -H 'content-type: application/json' -d '{"request_id":"<id>","score":0.2}'
@@ -99,11 +105,18 @@ curl localhost:8000/stats
 }
 ```
 
-Only the latest four user turns are included in routing features; the provider receives the supplied
-history (up to 20 messages and 20,000 total characters). `POST /chat/stream` returns server-sent
+Only short, explicit follow-ups use the latest four user turns in routing features; self-contained
+prompts are routed from their own content. The provider receives the supplied history (up to 20
+messages and 20,000 total characters). `POST /chat/stream` returns server-sent
 events (`data: {"type":"delta","text":"..."}` followed by a `type: done` event with request metadata).
 When cascading is enabled, candidate text is buffered until the judge accepts an answer so rejected
 attempts are not sent as user-visible output.
+
+Routing combines a prompt-complexity heuristic with learned quality estimates. The heuristic remains
+a prior after feedback arrives, so sparse observations do not immediately push every prompt to an
+untried tier; strong accumulated evidence can still change the choice. Negative feedback may cause
+the bandit to try a more capable tier. Learned observations are persisted in SQLite and continue to
+affect choices after server restarts.
 
 For deterministic tier testing, set `ROUTELEARN_ALLOW_TIER_OVERRIDE=true` before starting the
 server. Then `/chat`, `/chat/stream`, and `/explain` accept `"force_tier": "medium"` or

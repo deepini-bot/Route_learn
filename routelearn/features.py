@@ -14,6 +14,12 @@ CONSTRAINT_KW = ["must", "exactly", "at least", "at most", "do not", "only", "fo
 SIMPLE_PAT = r"^(what is|who is|define|translate|capital of|give one fact|who wrote)\b"
 MULTI_PAT = r"\b(first|then|finally|and also|step \d)\b"
 MATH_PAT = r"[∑∫√≤≥]|\d+\s*[\^*/]\s*\d+|\bequation\b|\btheorem\b|\bproof\b"
+FOLLOW_UP_PAT = re.compile(
+    r"^(?:(?:ok|sure|yes|please)[, ]+)?"
+    r"(?:do (?:it|that|this)|why|how so|continue|go on|elaborate|expand|"
+    r"explain more|tell me more|what about(?: it| that| this)?|same(?: for .+)?)[.!?]*$",
+    re.IGNORECASE,
+)
 
 FEATURE_NAMES = ["bias", "log_words", "n_sentences", "n_reason", "n_code", "code_block",
                  "math", "multi_part", "simple_pattern", "constraints", "explain_task",
@@ -27,10 +33,16 @@ def _count(low: str, kws) -> int:
 
 
 def extract(prompt: str, history: list[dict[str, str]] | None = None) -> np.ndarray:
-    prior_user_turns = [
-        message["content"] for message in (history or [])
-        if message.get("role") == "user"
-    ][-4:]
+    current = prompt.strip()
+    uses_history = len(current.split()) <= 6 and bool(FOLLOW_UP_PAT.fullmatch(current))
+    prior_user_turns = (
+        [
+            message["content"] for message in (history or [])
+            if message.get("role") == "user"
+        ][-4:]
+        if uses_history
+        else []
+    )
     prompt = "\n".join(prior_user_turns + [prompt])
     p = prompt.strip()
     low = p.lower()
